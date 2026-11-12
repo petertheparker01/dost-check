@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 import requests
@@ -99,6 +100,11 @@ def precheck():
         run = "no"            # ntfy se baat nahi ho paayi, galat alert se bachne ke liye ruk jao
     else:
         run = "no" if pc_is_alive(ping) else "yes"
+    if run == "no":
+        st = load_state()
+        if st.get("pc_off_notified"):
+            st["pc_off_notified"] = False      # PC wapas on hua, agli baar band hone par phir se message aayega
+            save_state(st)
     print("PC on hai, cloud ruka." if run == "no" else "PC band lagta hai, cloud check karega.")
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -110,18 +116,19 @@ def get_last_login():
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, timeout=30000)
         page = browser.new_page()
         try:
-            page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+            page.set_default_timeout(20000)
+            page.goto(URL, wait_until="domcontentloaded", timeout=30000)
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=8000)
             except PWTimeout:
                 pass
             box = page.locator(
                 'input[type="text"], input[type="number"], input[type="tel"], input:not([type])'
             ).first
-            box.wait_for(timeout=20000)
+            box.wait_for(timeout=15000)
             if box.input_value().strip() != UID:
                 for _ in range(4):
                     box.click()
@@ -137,7 +144,7 @@ def get_last_login():
             except Exception:
                 box.press("Enter")
 
-            deadline = time.time() + 40
+            deadline = time.time() + 25
             value = None
             while time.time() < deadline:
                 value = page.evaluate(JS_LAST)
@@ -168,14 +175,20 @@ def run():
     ping = last_pc_ping()
     state = load_state()
 
-    # PC band hone ki pehli khabar (sirf tab jab PC pehle kabhi ping bhej chuka ho)
-    if isinstance(ping, dict) and not state.get("pc_off_notified"):
-        notify("PC band lag raha hai",
-               "PC se ping nahi aa rahi. Ab cloud dost ka login check karega.", "high")
-        state["pc_off_notified"] = True
+    # Kya ye PC band hone ke baad cloud ka PEHLA check hai? (tab ek baar Last Login ka message jayega)
+    first_off = isinstance(ping, dict) and not state.get("pc_off_notified")
 
     value = get_last_login()
     if not value:
+        print("Pehli koshish fail, 5 second baad dobara.")
+        time.sleep(5)
+        value = get_last_login()
+
+    if not value:
+        if first_off:
+            notify("PC band lag raha hai",
+                   "PC se ping nahi aa rahi. Cloud ne check karna shuru kiya, par abhi Last Login padh nahi paya.", "high")
+            state["pc_off_notified"] = True
         save_state(state)
         return
 
@@ -190,6 +203,13 @@ def run():
     else:
         known = ping_known or state.get("value")
 
+    # PC band hote hi ek baar: dost ka abhi ka Last Login
+    if first_off:
+        notify("PC band lag raha hai",
+               f"Dost ka abhi ka Last Login: {value}. Ab cloud check karega, naya login aate hi message aayega.", "high")
+        state["pc_off_notified"] = True
+
+    # Naya login mila (PC band hone ke dauran bhi) to alert
     if known is None:
         print("Pehli reading save hui.")
     elif value != known:
@@ -198,13 +218,23 @@ def run():
     else:
         print("Koi naya login nahi.")
 
-    state["value"] = value
-    state["ts"] = time.time()
+    # Sirf tab save karo jab kuch badla ho (ya 12 ghante se save nahi hua), taaki commit baar-baar na bane
+    if state.get("value") != value or known != value or time.time() - state.get("ts", 0) > 43200:
+        state["value"] = value
+        state["ts"] = time.time()
     save_state(state)
+
+
+def _hard_stop():
+    print("Time limit khatam, run band kiya.")
+    os._exit(0)
 
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
+    t = threading.Timer(210, _hard_stop)
+    t.daemon = True
+    t.start()
     if mode == "precheck":
         precheck()
     else:
