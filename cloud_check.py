@@ -40,6 +40,24 @@ JS_LAST = (
 )
 
 
+def to_ist(s):
+    """Killarnation ka time BST (India se 30 minute aage) hota hai. Isse India time banata hai (30 minute kam)."""
+    try:
+        if not s or "BST" not in s:
+            return s
+        m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)", s, re.I)
+        if not m:
+            return s
+        d, mon, y, hh, mm, ss, ap = m.groups()
+        from datetime import datetime, timedelta
+        dt = datetime.strptime(f"{int(d):02d} {mon.title()} {y} {int(hh):02d}:{mm}:{ss or '00'} {ap.upper()}",
+                               "%d %b %Y %I:%M:%S %p")
+        dt = dt - timedelta(minutes=30)
+        return dt.strftime("%d %b %Y, %I:%M %p").lstrip("0") + " (India time)"
+    except Exception:
+        return s
+
+
 def need_env():
     if not UID or not TOPIC:
         print("FF_UID ya NTFY_TOPIC secret nahi mila.")
@@ -206,7 +224,7 @@ def run():
     # PC band hote hi ek baar: dost ka abhi ka Last Login
     if first_off:
         notify("PC band lag raha hai",
-               f"Dost ka abhi ka Last Login: {value}. Ab cloud check karega, naya login aate hi message aayega.", "high")
+               f"Dost ka abhi ka Last Login: {to_ist(value)}. Ab cloud check karega, naya login aate hi message aayega.", "high")
         state["pc_off_notified"] = True
 
     # Naya login mila (PC band hone ke dauran bhi) to alert
@@ -214,7 +232,7 @@ def run():
         print("Pehli reading save hui.")
     elif value != known:
         print("NAYA LOGIN mila, alert bheja.")
-        notify("Dost online aaya!", f"Naya Last Login: {value} (cloud se)", "urgent")
+        notify("Dost online aaya!", f"Naya Last Login: {to_ist(value)} (cloud se)", "urgent")
     else:
         print("Koi naya login nahi.")
 
