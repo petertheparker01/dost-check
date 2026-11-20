@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -26,6 +27,7 @@ PC_TOPIC = TOPIC + "-pc"
 STATE_FILE = "state.json"
 PC_ALIVE_MIN = 25          # itne minute se zyada ping na aaye to PC band maana jayega
 URL = "https://killarnation.com/tools/free-fire-id-checker/?uid=" + UID
+URL_JORNAL = "https://freefirejornal.com/en/profile/" + UID + "/"
 
 JS_LAST = (
     "() => {"
@@ -40,22 +42,54 @@ JS_LAST = (
 )
 
 
-def to_ist(s):
-    """Killarnation ka time BST (India se 30 minute aage) hota hai. Isse India time banata hai (30 minute kam)."""
+MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+TZ_HOURS = {"BST": 6, "UTC": 0, "GMT": 0, "IST": 5.5}
+
+
+def parse_dt(s):
+    """Last Login ke text se UTC datetime banata hai. Dono site ke format samajhta hai. Na samjhe to None."""
     try:
-        if not s or "BST" not in s:
-            return s
-        m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)", s, re.I)
-        if not m:
-            return s
-        d, mon, y, hh, mm, ss, ap = m.groups()
-        from datetime import datetime, timedelta
-        dt = datetime.strptime(f"{int(d):02d} {mon.title()} {y} {int(hh):02d}:{mm}:{ss or '00'} {ap.upper()}",
-                               "%d %b %Y %I:%M:%S %p")
-        dt = dt - timedelta(minutes=30)
-        return dt.strftime("%d %b %Y, %I:%M %p").lstrip("0") + " (India time)"
+        if not s:
+            return None
+        # killarnation: "14 Nov 2026 at 10:08:37 AM (BST)"
+        m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)\s*\(?([A-Za-z]+)?\)?", s, re.I)
+        if m:
+            d, mon, y, hh, mm, ss, ap, tz = m.groups()
+        else:
+            # freefirejornal: "November 20, 2026, 10:37:59 UTC"
+            m = re.search(r"([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*([A-Za-z]+)?", s, re.I)
+            if not m:
+                return None
+            mon, d, y, hh, mm, ss, ap, tz = m.groups()
+        month = MONTHS.get(mon[:3].lower())
+        if not month:
+            return None
+        hour = int(hh)
+        if ap:
+            hour = hour % 12 + (12 if ap.upper() == "PM" else 0)
+        dt = datetime(int(y), month, int(d), hour, int(mm), int(ss or 0))
+        offset = TZ_HOURS.get((tz or "").upper(), 0)
+        return (dt - timedelta(hours=offset)).replace(tzinfo=timezone.utc)
     except Exception:
+        return None
+
+
+def to_ist(s):
+    """Last Login ko India time (IST) me badalta hai, taaki message me sahi time dikhe."""
+    dt = parse_dt(s)
+    if dt is None:
         return s
+    ist = dt + timedelta(hours=5, minutes=30)
+    return ist.strftime("%d %b %Y, %I:%M %p").lstrip("0") + " (India time)"
+
+
+def is_newer(new, old):
+    """True agar new Last Login old se naya hai. Purana (cached) time aaye to False (jhootha alert nahi)."""
+    a, b = parse_dt(new), parse_dt(old)
+    if a and b:
+        return a > b
+    return new != old
 
 
 def need_env():
@@ -130,7 +164,39 @@ def precheck():
             f.write(f"run={run}\n")
 
 
-def get_last_login():
+
+def get_last_login_jornal():
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=30000)
+        page = browser.new_page()
+        try:
+            page.set_default_timeout(20000)
+            page.goto(URL_JORNAL, wait_until="domcontentloaded", timeout=30000)
+            deadline = time.time() + 30
+            value = None
+            while time.time() < deadline:
+                try:
+                    body = page.inner_text("body")
+                except Exception:
+                    body = ""
+                refreshing = "Showing the latest available copy" in body
+                value = page.evaluate(JS_LAST)
+                if value and not refreshing:
+                    break
+                time.sleep(2)
+            if not value:
+                raise PWTimeout("Last login nahi mila")
+            return re.sub(r"\s+", " ", value).strip()
+        except Exception as e:
+            print(f"freefirejornal fail: {type(e).__name__}")
+            return None
+        finally:
+            browser.close()
+
+
+def get_last_login_killar():
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     with sync_playwright() as p:
@@ -185,75 +251,4 @@ def get_last_login():
             print(f"Check fail: {type(e).__name__} | captcha jaisa kuch dikha: {captcha}")
             return None
         finally:
-            browser.close()
-
-
-def run():
-    need_env()
-    ping = last_pc_ping()
-    state = load_state()
-
-    # Kya ye PC band hone ke baad cloud ka PEHLA check hai? (tab ek baar Last Login ka message jayega)
-    first_off = isinstance(ping, dict) and not state.get("pc_off_notified")
-
-    value = get_last_login()
-    if not value:
-        print("Pehli koshish fail, 5 second baad dobara.")
-        time.sleep(5)
-        value = get_last_login()
-
-    if not value:
-        if first_off:
-            notify("PC band lag raha hai",
-                   "PC se ping nahi aa rahi. Cloud ne check karna shuru kiya, par abhi Last Login padh nahi paya.", "high")
-            state["pc_off_notified"] = True
-        save_state(state)
-        return
-
-    ping_known = None
-    if isinstance(ping, dict):
-        msg = (ping.get("message") or "").strip()
-        ping_known = msg if msg and msg != "-" else None
-
-    # "pichla" Last Login: jo naya hai wahi (cloud ka apna ya PC ka bataya hua)
-    if state.get("value") and (not isinstance(ping, dict) or state.get("ts", 0) > ping["time"]):
-        known = state["value"]
-    else:
-        known = ping_known or state.get("value")
-
-    # PC band hote hi ek baar: dost ka abhi ka Last Login
-    if first_off:
-        notify("PC band lag raha hai",
-               f"Dost ka abhi ka Last Login: {to_ist(value)}. Ab cloud check karega, naya login aate hi message aayega.", "high")
-        state["pc_off_notified"] = True
-
-    # Naya login mila (PC band hone ke dauran bhi) to alert
-    if known is None:
-        print("Pehli reading save hui.")
-    elif value != known:
-        print("NAYA LOGIN mila, alert bheja.")
-        notify("Dost online aaya!", f"Naya Last Login: {to_ist(value)} (cloud se)", "urgent")
-    else:
-        print("Koi naya login nahi.")
-
-    # Sirf tab save karo jab kuch badla ho (ya 12 ghante se save nahi hua), taaki commit baar-baar na bane
-    if state.get("value") != value or known != value or time.time() - state.get("ts", 0) > 43200:
-        state["value"] = value
-        state["ts"] = time.time()
-    save_state(state)
-
-
-def _hard_stop():
-    print("Time limit khatam, run band kiya.")
-    os._exit(0)
-
-
-if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "run"
-    t = threading.Timer(210, _hard_stop)
-    t.daemon = True
-    t.start()
-    if mode == "precheck":
-        precheck()
-    else:
-        run()
+   
