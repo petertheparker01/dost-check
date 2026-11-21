@@ -185,6 +185,10 @@ def get_last_login_jornal():
                 value = page.evaluate(JS_LAST)
                 if value and not refreshing:
                     break
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
                 time.sleep(2)
             if not value:
                 raise PWTimeout("Last login nahi mila")
