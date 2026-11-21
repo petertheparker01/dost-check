@@ -251,4 +251,81 @@ def get_last_login_killar():
             print(f"Check fail: {type(e).__name__} | captcha jaisa kuch dikha: {captcha}")
             return None
         finally:
-   
+            browser.close()
+
+
+def get_last_login():
+    for name, fn in (("freefirejornal", get_last_login_jornal), ("killarnation", get_last_login_killar)):
+        value = fn()
+        if value:
+            print(f"Last Login {name} se mila.")
+            return value
+    return None
+
+
+def run():
+    need_env()
+    ping = last_pc_ping()
+    state = load_state()
+
+    # Kya ye PC band hone ke baad cloud ka PEHLA check hai? (tab ek baar Last Login ka message jayega)
+    first_off = isinstance(ping, dict) and not state.get("pc_off_notified")
+
+    value = get_last_login()
+
+    if not value:
+        if first_off:
+            notify("PC band lag raha hai",
+                   "PC se ping nahi aa rahi. Cloud ne check karna shuru kiya, par abhi Last Login padh nahi paya.", "high")
+            state["pc_off_notified"] = True
+        save_state(state)
+        return
+
+    ping_known = None
+    if isinstance(ping, dict):
+        msg = (ping.get("message") or "").strip()
+        ping_known = msg if msg and msg != "-" else None
+
+    # "pichla" Last Login: jo naya hai wahi (cloud ka apna ya PC ka bataya hua)
+    if state.get("value") and (not isinstance(ping, dict) or state.get("ts", 0) > ping["time"]):
+        known = state["value"]
+    else:
+        known = ping_known or state.get("value")
+
+    # PC band hote hi ek baar: dost ka abhi ka Last Login
+    if first_off:
+        notify("PC band lag raha hai",
+               f"Dost ka abhi ka Last Login: {to_ist(value)}. Ab cloud check karega, naya login aate hi message aayega.", "high")
+        state["pc_off_notified"] = True
+
+    # Naya login mila (PC band hone ke dauran bhi) to alert
+    if known is None:
+        print("Pehli reading save hui.")
+    elif is_newer(value, known):
+        print("NAYA LOGIN mila, alert bheja.")
+        notify("Dost online aaya!", f"Naya Last Login: {to_ist(value)} (cloud se)", "urgent")
+    else:
+        print("Koi naya login nahi.")
+
+    # Sirf tab save karo jab kuch badla ho (ya 12 ghante se save nahi hua), taaki commit baar-baar na bane
+    best = value if (known is None or is_newer(value, known)) else known
+    if state.get("value") != best or time.time() - state.get("ts", 0) > 43200:
+        state["value"] = best
+        state["ts"] = time.time()
+    save_state(state)
+
+
+def _hard_stop():
+    print("Time limit khatam, run band kiya.")
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "run"
+    t = threading.Timer(210, _hard_stop)
+    t.daemon = True
+    t.start()
+    if mode == "precheck":
+        precheck()
+    else:
+        run()
