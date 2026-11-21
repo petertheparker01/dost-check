@@ -28,6 +28,8 @@ STATE_FILE = "state.json"
 PC_ALIVE_MIN = 25          # itne minute se zyada ping na aaye to PC band maana jayega
 URL = "https://killarnation.com/tools/free-fire-id-checker/?uid=" + UID
 URL_JORNAL = "https://freefirejornal.com/en/profile/" + UID + "/"
+API_URL = "https://glob-info2.vercel.app/info?uid=" + UID
+URL_MOBILEVERSO = "https://mobileverso.com.br/en/freefire/player/" + UID
 
 JS_LAST = (
     "() => {"
@@ -258,8 +260,59 @@ def get_last_login_killar():
             browser.close()
 
 
+def get_last_login_api(ctx=None):
+    """Seedha API se Last Login (bina browser, bina captcha). Unix timestamp ko padhne layak text me badalta hai."""
+    try:
+        r = requests.get(API_URL, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            print(f"API ne HTTP {r.status_code} diya")
+            return None
+        data = r.json()
+        ts = (data.get("basicInfo") or {}).get("lastLoginAt")
+        if not ts:
+            print("API ke jawab me lastLoginAt nahi mila")
+            return None
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        return dt.strftime("%B %d, %Y, %H:%M:%S UTC")
+    except Exception as e:
+        print(f"API fail: {type(e).__name__}")
+        return None
+
+
+def get_last_login_mobileverso():
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=30000)
+        ctx = browser.new_context(timezone_id="Asia/Kolkata", locale="en-US")   # site time browser ke timezone me dikhati hai
+        page = ctx.new_page()
+        try:
+            page.set_default_timeout(20000)
+            page.goto(URL_MOBILEVERSO, wait_until="domcontentloaded", timeout=40000)
+            deadline = time.time() + 40
+            value = None
+            while time.time() < deadline:
+                try:
+                    body = page.inner_text("body")
+                except Exception:
+                    body = ""
+                m = re.search(r"Last login\s+([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4},?\s*\d{1,2}:\d{2}\s*(?:AM|PM))", body, re.I)
+                if m:
+                    value = re.sub(r"\s+", " ", m.group(1)).strip() + " IST"
+                    break
+                time.sleep(2)
+            if not value:
+                raise PWTimeout("Last login nahi mila")
+            return value
+        except Exception as e:
+            print(f"mobileverso fail: {type(e).__name__}")
+            return None
+        finally:
+            browser.close()
+
+
 def get_last_login():
-    for name, fn in (("freefirejornal", get_last_login_jornal),):   # killarnation hata di
+    for name, fn in (("mobileverso", get_last_login_mobileverso), ("api", get_last_login_api)):   # pehle mobileverso, phir api
         value = fn()
         if value:
             print(f"Last Login {name} se mila.")
