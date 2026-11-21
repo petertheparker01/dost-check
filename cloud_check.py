@@ -255,7 +255,7 @@ def get_last_login_killar():
 
 
 def get_last_login():
-    for name, fn in (("freefirejornal", get_last_login_jornal), ("killarnation", get_last_login_killar)):
+    for name, fn in (("freefirejornal", get_last_login_jornal),):   # killarnation hata di
         value = fn()
         if value:
             print(f"Last Login {name} se mila.")
