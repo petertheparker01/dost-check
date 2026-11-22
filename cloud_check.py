@@ -3,7 +3,7 @@ Cloud checker (GitHub Actions par chalti hai).
 
 Kaam:
 - PC on hai (PC ne haal hi me ping bheji) -> cloud kuch nahi karta.
-- PC band hai -> cloud HL Gaming, Mobileverso, phir API se Last Login padhta hai.
+- PC band hai -> cloud sirf HL Gaming se Last Login padhta hai.
   Naya login mile to phone me ntfy se "Dost online aaya!" (urgent) bhejta hai.
 
 Do mode:
@@ -28,8 +28,6 @@ STATE_FILE = "state.json"
 PC_ALIVE_MIN = 25          # itne minute se zyada ping na aaye to PC band maana jayega
 URL = "https://killarnation.com/tools/free-fire-id-checker/?uid=" + UID
 URL_JORNAL = "https://freefirejornal.com/en/profile/" + UID + "/"
-API_URL = "https://glob-info2.vercel.app/info?uid=" + UID
-URL_MOBILEVERSO = "https://mobileverso.com.br/en/freefire/player/" + UID
 URL_HL = "https://www.hlgamingofficial.com/p/free-fire-account-last-seenlogin.html"
 
 JS_LAST = (
@@ -126,3 +124,284 @@ def last_pc_ping():
     except Exception as e:
         print("ping padhne me error:", type(e).__name__)
         return "error"
+    last = None
+    for line in r.text.splitlines():
+        try:
+            m = json.loads(line)
+        except Exception:
+            continue
+        if m.get("event") == "message":
+            last = m
+    return last
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
+def pc_is_alive(ping):
+    return bool(ping) and ping != "error" and (time.time() - ping["time"]) < PC_ALIVE_MIN * 60
+
+
+def precheck():
+    need_env()
+    ping = last_pc_ping()
+    if ping == "error":
+        run = "no"            # ntfy se baat nahi ho paayi, galat alert se bachne ke liye ruk jao
+    else:
+        run = "no" if pc_is_alive(ping) else "yes"
+    if run == "no":
+        st = load_state()
+        if st.get("pc_off_notified"):
+            st["pc_off_notified"] = False      # PC wapas on hua, agli baar band hone par phir se message aayega
+            save_state(st)
+    print("PC on hai, cloud ruka." if run == "no" else "PC band lagta hai, cloud check karega.")
+    out = os.environ.get("GITHUB_OUTPUT")
+    if out:
+        with open(out, "a") as f:
+            f.write(f"run={run}\n")
+
+
+
+def get_last_login_jornal():
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=30000)
+        page = browser.new_page()
+        try:
+            page.set_default_timeout(20000)
+            page.goto(URL_JORNAL, wait_until="domcontentloaded", timeout=30000)
+            deadline = time.time() + 30
+            value = None
+            while time.time() < deadline:
+                try:
+                    body = page.inner_text("body")
+                except Exception:
+                    body = ""
+                refreshing = "Showing the latest available copy" in body
+                value = page.evaluate(JS_LAST)
+                if value and not refreshing:
+                    break
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+                time.sleep(2)
+            if not value:
+                raise PWTimeout("Last login nahi mila")
+            return re.sub(r"\s+", " ", value).strip()
+        except Exception as e:
+            print(f"freefirejornal fail: {type(e).__name__}")
+            return None
+        finally:
+            browser.close()
+
+
+def get_last_login_killar():
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=30000)
+        page = browser.new_page()
+        try:
+            page.set_default_timeout(20000)
+            page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except PWTimeout:
+                pass
+            box = page.locator(
+                'input[type="text"], input[type="number"], input[type="tel"], input:not([type])'
+            ).first
+            box.wait_for(timeout=15000)
+            if box.input_value().strip() != UID:
+                for _ in range(4):
+                    box.click()
+                    box.fill("")
+                    box.press_sequentially(UID, delay=60)
+                    time.sleep(1)
+                    if box.input_value().strip() == UID:
+                        break
+                else:
+                    raise RuntimeError("UID box me nahi bhari")
+            try:
+                page.locator('button:has-text("Check ID")').first.click(timeout=8000)
+            except Exception:
+                box.press("Enter")
+
+            deadline = time.time() + 25
+            value = None
+            while time.time() < deadline:
+                value = page.evaluate(JS_LAST)
+                if value:
+                    break
+                time.sleep(1)
+            if not value:
+                raise PWTimeout("Last Login box nahi mila")
+            return re.sub(r"\s+", " ", value).strip()
+        except Exception as e:
+            captcha = False
+            try:
+                captcha = page.evaluate(
+                    "() => !!document.querySelector("
+                    "'iframe[src*=\"challenges.cloudflare\"], iframe[src*=\"turnstile\"], "
+                    "iframe[src*=\"recaptcha\"], iframe[src*=\"hcaptcha\"], .cf-turnstile')"
+                )
+            except Exception:
+                pass
+            print(f"Check fail: {type(e).__name__} | captcha jaisa kuch dikha: {captcha}")
+            return None
+        finally:
+            browser.close()
+
+
+
+def get_last_login_hl():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=30000)
+        ctx = browser.new_context(timezone_id="Asia/Kolkata", locale="en-US")
+        page = ctx.new_page()
+        try:
+            page.set_default_timeout(20000)
+            page.goto(URL_HL, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_function("() => /session ready/i.test(document.body.innerText)", timeout=25000)
+            except Exception:
+                pass
+            # Region = India
+            try:
+                page.locator("select").first.select_option(label="India", timeout=8000)
+            except Exception:
+                try:
+                    page.get_by_text("India", exact=True).first.click(timeout=5000)
+                except Exception:
+                    pass
+            # User ID wala box
+            box = None
+            for finder in (
+                lambda: page.get_by_label("User ID"),
+                lambda: page.locator('input[placeholder*="ID" i]'),
+                lambda: page.locator('input[type="text"]:visible, input[type="number"]:visible, input[type="tel"]:visible, input:not([type]):visible'),
+            ):
+                try:
+                    cand = finder().first
+                    cand.wait_for(timeout=6000)
+                    box = cand
+                    break
+                except Exception:
+                    continue
+            if box is None:
+                raise RuntimeError("User ID box nahi mila")
+            box.click()
+            box.fill("")
+            box.press_sequentially(UID, delay=40)
+            page.get_by_role("button", name=re.compile(r"check (now|again)", re.I)).click(timeout=8000)
+
+            deadline = time.time() + 50
+            value = None
+            while time.time() < deadline:
+                try:
+                    body = page.inner_text("body")
+                except Exception:
+                    body = ""
+                m = re.search(r"(\d{1,2}/\d{1,2}/\d{4},?\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))\s*Last Login", body, re.I)
+                if m:
+                    value = re.sub(r"\s+", " ", m.group(1)).strip() + " IST"
+                    break
+                time.sleep(2)
+            if not value:
+                raise TimeoutError("Last Login nahi mila")
+            return value
+        except Exception as e:
+            print(f"hlgaming fail: {type(e).__name__}")
+            return None
+        finally:
+            browser.close()
+
+
+
+def get_last_login():
+    value = get_last_login_hl()
+    if value:
+        print("Last Login hlgaming se mila.")
+    return value
+
+
+def run():
+    need_env()
+    ping = last_pc_ping()
+    state = load_state()
+
+    # Kya ye PC band hone ke baad cloud ka PEHLA check hai? (tab ek baar Last Login ka message jayega)
+    first_off = ping != "error" and not pc_is_alive(ping) and not state.get("pc_off_notified")
+
+    value = get_last_login()
+
+    if not value:
+        if first_off:
+            notify("PC band lag raha hai",
+                   "PC se ping nahi aa rahi. Cloud ne check karna shuru kiya, par abhi Last Login padh nahi paya.", "high")
+            state["pc_off_notified"] = True
+        save_state(state)
+        return
+
+    ping_known = None
+    if isinstance(ping, dict):
+        msg = (ping.get("message") or "").strip()
+        ping_known = msg if msg and msg != "-" else None
+
+    # "pichla" Last Login: jo naya hai wahi (cloud ka apna ya PC ka bataya hua)
+    if state.get("value") and (not isinstance(ping, dict) or state.get("ts", 0) > ping["time"]):
+        known = state["value"]
+    else:
+        known = ping_known or state.get("value")
+
+    # PC band hote hi ek baar: dost ka abhi ka Last Login
+    if first_off:
+        notify("PC band lag raha hai",
+               f"Dost ka abhi ka Last Login: {to_ist(value)}. Ab cloud check karega, naya login aate hi message aayega.", "high")
+        state["pc_off_notified"] = True
+
+    # Naya login mila (PC band hone ke dauran bhi) to alert
+    if known is None:
+        print("Pehli reading save hui.")
+    elif is_newer(value, known):
+        print("NAYA LOGIN mila, alert bheja.")
+        notify("Dost online aaya!", f"Naya Last Login: {to_ist(value)} (cloud se)", "urgent")
+    else:
+        print("Koi naya login nahi.")
+
+    # Sirf tab save karo jab kuch badla ho (ya 12 ghante se save nahi hua), taaki commit baar-baar na bane
+    best = value if (known is None or is_newer(value, known)) else known
+    if state.get("value") != best or time.time() - state.get("ts", 0) > 43200:
+        state["value"] = best
+        state["ts"] = time.time()
+    save_state(state)
+
+
+def _hard_stop():
+    print("Time limit khatam, run band kiya.")
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "run"
+    t = threading.Timer(210, _hard_stop)
+    t.daemon = True
+    t.start()
+    if mode == "precheck":
+        precheck()
+    else:
+        run()
