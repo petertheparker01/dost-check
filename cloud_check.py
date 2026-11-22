@@ -30,6 +30,7 @@ URL = "https://killarnation.com/tools/free-fire-id-checker/?uid=" + UID
 URL_JORNAL = "https://freefirejornal.com/en/profile/" + UID + "/"
 API_URL = "https://glob-info2.vercel.app/info?uid=" + UID
 URL_MOBILEVERSO = "https://mobileverso.com.br/en/freefire/player/" + UID
+URL_HL = "https://www.hlgamingofficial.com/p/free-fire-account-last-seenlogin.html"
 
 JS_LAST = (
     "() => {"
@@ -50,23 +51,29 @@ TZ_HOURS = {"BST": 6, "UTC": 0, "GMT": 0, "IST": 5.5}
 
 
 def parse_dt(s):
-    """Last Login ke text se UTC datetime banata hai. Dono site ke format samajhta hai. Na samjhe to None."""
+    """Last Login ke text se UTC datetime banata hai. Sab sites ke format samajhta hai. Na samjhe to None."""
     try:
         if not s:
             return None
-        # killarnation: "14 Nov 2026 at 10:08:37 AM (BST)"
-        m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)\s*\(?([A-Za-z]+)?\)?", s, re.I)
+        # hlgaming: "11/22/2026, 11:27:26 AM IST"  (mahina/tareekh/saal)
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*([A-Za-z]+)?", s, re.I)
         if m:
-            d, mon, y, hh, mm, ss, ap, tz = m.groups()
+            mo, d, y, hh, mm, ss, ap, tz = m.groups()
+            month = int(mo)
         else:
-            # freefirejornal: "November 20, 2026, 10:37:59 UTC"
-            m = re.search(r"([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*([A-Za-z]+)?", s, re.I)
-            if not m:
+            # killarnation: "14 Nov 2026 at 10:08:37 AM (BST)"
+            m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)\s*\(?([A-Za-z]+)?\)?", s, re.I)
+            if m:
+                d, mon, y, hh, mm, ss, ap, tz = m.groups()
+            else:
+                # freefirejornal / mobileverso: "November 20, 2026, 10:37:59 UTC" ya "Nov 21, 2026, 8:09 PM IST"
+                m = re.search(r"([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*([A-Za-z]+)?", s, re.I)
+                if not m:
+                    return None
+                mon, d, y, hh, mm, ss, ap, tz = m.groups()
+            month = MONTHS.get(mon[:3].lower())
+            if not month:
                 return None
-            mon, d, y, hh, mm, ss, ap, tz = m.groups()
-        month = MONTHS.get(mon[:3].lower())
-        if not month:
-            return None
         hour = int(hh)
         if ap:
             hour = hour % 12 + (12 if ap.upper() == "PM" else 0)
@@ -279,6 +286,71 @@ def get_last_login_api(ctx=None):
         return None
 
 
+def get_last_login_hl():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, timeout=30000)
+        ctx = browser.new_context(timezone_id="Asia/Kolkata", locale="en-US")
+        page = ctx.new_page()
+        try:
+            page.set_default_timeout(20000)
+            page.goto(URL_HL, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_function("() => /session ready/i.test(document.body.innerText)", timeout=25000)
+            except Exception:
+                pass
+            # Region = India
+            try:
+                page.locator("select").first.select_option(label="India", timeout=8000)
+            except Exception:
+                try:
+                    page.get_by_text("India", exact=True).first.click(timeout=5000)
+                except Exception:
+                    pass
+            # User ID wala box
+            box = None
+            for finder in (
+                lambda: page.get_by_label("User ID"),
+                lambda: page.locator('input[placeholder*="ID" i]'),
+                lambda: page.locator('input[type="text"]:visible, input[type="number"]:visible, input[type="tel"]:visible, input:not([type]):visible'),
+            ):
+                try:
+                    cand = finder().first
+                    cand.wait_for(timeout=6000)
+                    box = cand
+                    break
+                except Exception:
+                    continue
+            if box is None:
+                raise RuntimeError("User ID box nahi mila")
+            box.click()
+            box.fill("")
+            box.press_sequentially(UID, delay=40)
+            page.get_by_role("button", name=re.compile(r"check (now|again)", re.I)).click(timeout=8000)
+
+            deadline = time.time() + 50
+            value = None
+            while time.time() < deadline:
+                try:
+                    body = page.inner_text("body")
+                except Exception:
+                    body = ""
+                m = re.search(r"(\d{1,2}/\d{1,2}/\d{4},?\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))\s*Last Login", body, re.I)
+                if m:
+                    value = re.sub(r"\s+", " ", m.group(1)).strip() + " IST"
+                    break
+                time.sleep(2)
+            if not value:
+                raise TimeoutError("Last Login nahi mila")
+            return value
+        except Exception as e:
+            print(f"hlgaming fail: {type(e).__name__}")
+            return None
+        finally:
+            browser.close()
+
+
 def get_last_login_mobileverso():
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -312,7 +384,7 @@ def get_last_login_mobileverso():
 
 
 def get_last_login():
-    for name, fn in (("mobileverso", get_last_login_mobileverso), ("api", get_last_login_api)):   # pehle mobileverso, phir api
+    for name, fn in (("hlgaming", get_last_login_hl), ("mobileverso", get_last_login_mobileverso), ("api", get_last_login_api)):   # pehle HL Gaming, phir mobileverso, phir api
         value = fn()
         if value:
             print(f"Last Login {name} se mila.")
